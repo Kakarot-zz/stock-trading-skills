@@ -12,38 +12,29 @@ category: finance
 
 ## 数据来源
 1. **龙虎榜明细（akshare推荐）** — `akshare.stock_lhb_detail_em(start_date='YYYYMMDD', end_date='YYYYMMDD')`
-   - ✅ **此API可用**（2026-05-29验证：返回94条记录）
-   - ⚠️ **无 `OPERATEDEPT_NAME` 字段**，无法做量化席位过滤
+   - ✅ **此API可用**（2026-06-04验证：返回上榜日/收盘价/涨跌幅/净买额/买卖额/换手率/上榜原因/上榜后涨跌幅）
+   - ⚠️ **无席位名称字段**，无法做量化席位过滤
    - 返回：`代码`、`名称`、`上榜日`、`解读`、`收盘价`、`涨跌幅`、`龙虎榜净买额`、`龙虎榜买入额`、`龙虎榜卖出额`、`上榜原因`
 
-2. **龙虎榜明细 datacenter API（⚠️ 2026-05-29失效）** — `https://datacenter-web.eastmoney.com/api/data/v1/get?reportName=RPT_BILLBOARD_DAILYDETAILSBUY`
-   - ❌ **2026-05-29实测：返回 code=9501（报表配置不存在）**
-   - 曾经可用字段：`SECURITY_CODE`、`SECURITY_NAME`、`NET`（净买额/元）、`OPERATEDEPT_NAME`（营业部名称）
-   - **当此API失效时，无法通过API核实拉萨量化席位**，龙虎榜筛选结果需标注"席位风险未知"
-   ```
-   https://datacenter-web.eastmoney.com/api/data/v1/get?reportName=RPT_BILLBOARD_DAILYDETAILSBUY&columns=ALL&filter=(TRADE_DATE='YYYY-MM-DD')&pageNumber=1&pageSize=300&sortTypes=-1&sortColumns=NET&source=WEB&client=WEB
-   ```
-   - 字段：`SECURITY_CODE`（代码）、`SECURITY_NAME`（名称）、`NET`（净买额/元）、`BUY`（买入额/元）、`OPERATEDEPT_NAME`（营业部名称）、`EXPLANATION`（上榜原因）
-   - ✅ **此API可访问**，字段完整（含营业部名称，可做量化席位过滤）
-   - ⚠️ **pageSize=300 不能保证返回300条**：实际数量由服务器决定（实测有时只返回28条）
-   - **同一只股票可能有多行记录**（不同营业部席位），每行是一个营业部的买卖记录
-   - **正确流程**：先收集全部 rows → 按 `SECURITY_CODE` 分组合并 `NET` → 排序
-   - **名称获取**：腾讯行情API（不依赖push2），批量获取：`https://qt.gtimg.cn/q=sh600330,sz000063`
+2. **龙虎榜基础列表（东方财富HTML pagedata — 2026-05-30实测验证）**
+   - ✅ 主页 `https://data.eastmoney.com/stock/lhb.html` HTML 中内嵌 `pagedata` JSON
+   - ✅ `data['sbgg_all']['result']['data']` 路径已验证有效
+   - ✅ 正确正则：`re.search(r'pagedata\s*=\s*(\{.*?\});', html, re.DOTALL)`
+   - ❌ 旧正则 `re.search(r'"data":\(\{\\\[', html)` 从未匹配成功过，不要用
+   - 字段含：涨跌幅(CHANGE_RATE)、上榜次数(ONLIST_NUM)、代码、名称
 
-2. **龙虎榜基础列表（akshare备用）** — `akshare.stock_lhb_detail_em(start_date='YYYYMMDD', end_date='YYYYMMDD')`
-   - 返回：`代码`、`名称`、`上榜日`、`解读`、`收盘价`、`涨跌幅`、`龙虎榜净买额`、`龙虎榜买入额`、`龙虎榜卖出额`、`上榜原因`
-   - ⚠️ **无 `OPERATEDEPT_NAME` 字段**，无法做量化席位过滤
-   - 适用场景：只需净买额排名，不需要席位明细时
+3. **龙虎榜明细 datacenter API（⚠️ 2026-06-04全线失效）**
+   - ❌ `RPT_BILLBOARD_DAILYDETAILSBUY` — 返回9501，接口已下线
+   - ❌ `RPT_DAILYBILLBOARD` — 返回9501，接口已下线
+   - ❌ `RPT_LHB_ALLSTOCKS` — 返回9501，接口已下线
+   - **结论**：datacenter API 所有龙虎榜报表全部不可用
 
-3. **涨停板结构** — **akshare `stock_zt_pool_em(date='YYYYMMDD')`**（最准确）
-   - ⚠️ 日期格式为 `20260527`（8位数字字符串，不是`2026-05-27`）
-   - 字段：代码/名称/涨跌幅/首次封板时间/最后封板时间/炸板次数/连板数/所属行业/成交额/流通市值
-
-4. **龙虎榜席位数据** — `mx_data.py`（⚠️ push2.eastmoney.com被封禁，此路不通）
-
-5. **DDX大单动向** — `mx_data.py` 的 `MXData().query('{name}DDX')`
-
-6. **模拟持仓** — `mx_data.py` 的 `MXData().query('模拟持仓')`
+4. **龙虎榜席位数据** — `mx_data.py`（✅ 2026-06-04实测验证成功）
+   - `mx_data.MXData().query('{name}今日龙虎榜席位')` **可以获取席位名称列表**
+   - 返回格式：`rawTable` 用数字key('0','1','2'...), `nameMap` 映射到席位名字符串
+   - 拉萨量化席位识别：遍历所有席位名，关键词含"拉萨"即计数
+   - ⚠️ **查询间隔需≥3秒**，否则频率限制返回空
+   - ⚠️ **2026-06-04实测：datacenter API全部9501失效，MX席位查询是当前唯一可用的席位数据源**
 
 ---
 
@@ -92,66 +83,106 @@ category: finance
 
 ## 操作步骤
 
-### Step 1 — 获取当日龙虎榜基础列表
+### Step 1 — 获取当日龙虎榜明细（akshare，基础列表）
 
-从东方财富龙虎榜页面 HTML 中提取 `<script>pagedata=...</script>` 内嵌数据：
-
-**⚠️ 陷阱：HTML 中的 JSON 结构是 `data['sbgg_all']['result']['data']`，不是 `data['sbgg_all']['data']`**
+**⚠️ 关键规则：同一只股票可能有多行记录（不同营业部席位），每行是一个营业部的买卖记录。必须先收集全部 rows → 按 `代码` 分组合并 `龙虎榜净买额` → 排序。禁止用单行NET直接做判断。**
 
 ```python
-import urllib.request, re, json
+import akshare as ak, json
+from collections import defaultdict
 
-url = 'https://data.eastmoney.com/stock/lhb.html'
-req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-html = urllib.request.urlopen(req).read().decode('utf-8')
+date = '20260601'  # 8位数字，非 '2026-06-01'
+df = ak.stock_lhb_detail_em(start_date=date, end_date=date)
+# 返回列: 代码/名称/上榜日/解读/收盘价/涨跌幅/龙虎榜净买额/龙虎榜买入额/龙虎榜卖出额/上榜原因
+# ⚠️ 注意：df['龙虎榜净买额'] 可能是 Str 带万/亿单位，需转换
 
-# 正确方式：用正则直接提取 "data":[...] 数组段，再 json.loads
-m = re.search(r'"data":(\[\{[^ \]][^\]]*\])', html)
-if m:
-    rows = json.loads(m.group(1))
-    # 字段: SECURITY_CODE, SECURITY_NAME_ABBR, CHANGE_RATE, BILLBOARD_NET_AMT 等
-    rows.sort(key=lambda x: float(x['CHANGE_RATE']), reverse=True)
-    # rows[0] -> {'SECUCODE': '000010.SZ', 'SECURITY_CODE': '000010', 'SECURITY_NAME_ABBR': '*ST美丽', 'CHANGE_RATE': -4.9751, ...}
+# 合并同股票多席位数据
+net_by_code = defaultdict(float)
+buy_by_code = defaultdict(float)
+sell_by_code = defaultdict(float)
+reason_by_code = {}  # 上榜原因，保留第一个即可
+
+for _, row in df.iterrows():
+    code = row['代码']
+    net = row['龙虎榜净买额']
+    buy = row['龙虎榜买入额']
+    sell = row['龙虎榜卖出额']
+    def to_float(v):
+        if isinstance(v, (int, float)):
+            return float(v)
+        s = str(v).replace(' ', '')
+        if '亿' in s:
+            return float(s.replace('亿', '').replace(',', '')) * 1e8
+        if '万' in s:
+            return float(s.replace('万', '').replace(',', '')) * 1e4
+        return float(s.replace(',', ''))
+    net_by_code[code] += to_float(net)
+    buy_by_code[code] += to_float(buy)
+    sell_by_code[code] += to_float(sell)
+    if code not in reason_by_code:
+        reason_by_code[code] = row.get('上榜原因', '')
+
+# 排序（按净买额绝对值降序）
+sorted_codes = sorted(net_by_code.keys(), key=lambda c: abs(net_by_code[c]), reverse=True)
+print('净买额TOP10:')
+for code in sorted_codes[:10]:
+    name = df[df['代码']==code]['名称'].iloc[0]
+    reason = reason_by_code.get(code, '')
+    print(f"  {name}({code}) 净买{net_by_code[code]/1e8:.2f}亿 原因:{reason}")
 ```
 
-### Step 2 — 量化席位过滤（拉萨席位≥2排除）
+### Step 2 — 量化席位过滤（MX席位查询，已验证可用）
 
-**⚠️ 陷阱：`searchDataResultDTO` 是 dict（含 `dataTableDTOList`），不是 list。席位数据在 `dataTableDTOList[0]`，`rawTable` 用数字 key 存席位，`nameMap` 是席位名映射。`MXData()` 每次查询需间隔 ≥2.5秒防频率限制。**
+> ✅ **2026-06-04验证：mx_data龙虎榜席位查询成功返回席位名称，datacenter API全部9501失效。**
+> **席位名称查询必须走MX接口**，不能用datacenter API。
 
 ```python
-import sys, os, time
+import sys, time, os
 sys.path.insert(0, 'C:/Users/June/AppData/Local/hermes/skills/dfcf/mx-data')
-os.environ['MX_APIKEY'] = '你的MX_APIKEY'
+lines = open('C:/Users/June/AppData/Local/hermes/.env').readlines()
+os.environ['MX_APIKEY'] = lines[485].split('=',1)[1].strip()
 import mx_data
 
-拉萨_KEYWORDS = ['拉萨团结路','拉萨金融城','拉萨东环路','拉萨山南','拉萨娘猜','拉萨当雄','拉萨虎空路','东方财富拉萨']
+LASA_KW = ['拉萨', '量化基金', '量化打板', 'T王']
 
-def filter_quant(name):
-    """返回 (拉萨席位列表, 全部席位列表)"""
-    time.sleep(2.5)  # 防频率限制
-    r = mx_data.MXData().query(f'{name}今日龙虎榜席位')
-    if not r or not r.get('success'):
-        return [], []
-    dto_dict = r['data']['data'].get('searchDataResultDTO', {})
-    dto_list = dto_dict.get('dataTableDTOList', [])
-    if not dto_list:
-        return [], []
-    dto = dto_list[0]  # 第一个 table 是龙虎榜席位
-    name_map = dto.get('nameMap', {})
-    raw = dto.get('rawTable', {})
-    all_seats, lasa_seats = [], []
-    for k, v in raw.items():
-        if k == 'headName' or not isinstance(v, list):
-            continue
-        seat_name = name_map.get(k, '')
-        if seat_name:
-            all_seats.append(seat_name)
-            if any(lk in seat_name for lk in 拉萨_KEYWORDS):
-                lasa_seats.append(seat_name)
-    return lasa_seats, all_seats
+def get_lasa_count(name):
+    """查询某股票今日龙虎榜席位数，返回拉萨量化席位数量"""
+    time.sleep(3.5)
+    try:
+        r = mx_data.MXData().query(f'{name}今日龙虎榜席位')
+        if not r or not r.get('success'):
+            return -1  # 查询失败
+        dto_list = r.get('data',{}).get('data',{}).get('searchDataResultDTO',{}).get('dataTableDTOList',[])
+        seats = []
+        for dto in dto_list:
+            raw = dto.get('rawTable', {})
+            nm = dto.get('nameMap', {})
+            for k, v in raw.items():
+                if k == 'headName' or not isinstance(v, list): continue
+                seat = nm.get(k, k)
+                seats.append(seat)
+        lasa = sum(1 for s in seats if any(kw in s for kw in LASA_KW))
+        return lasa, seats
+    except Exception as e:
+        return -1, []
+
+# 使用示例
+lasa, seats = get_lasa_count('通鼎互联')
+print(f'拉萨席位数={lasa}, 全部席位={seats}')
+# lasa >= 2 → 量化嫌疑，排除
+# lasa == 1 → 降仓，快进快出
+# lasa == 0 → 正常
 ```
 
+**已知关键规则**：
+- `dataTableDTOList` 中每个元素是一个席位（一个dict）
+- `rawTable` 的key是'0','1','2'...（行号），**不是**f88/f89等
+- `nameMap` 映射 key → 席位中文名
+- ⚠️ 查询间隔必须≥3秒，否则返回空（频率限制）
+
 ### Step 3 — 查询DDX大单动向
+
+> ⚠️ **datacenter API 已下线，席位名称无法获取。DDX数据从 mx_data.MXData().query() 获取（见下方）。**
 
 **⚠️ 陷阱：DDX 数据路径是 `data['data']['searchDataResultDTO']['dataTableDTOList'][0]['table']`，其中 f88=当日DDX、f89=当日DDY、f90=当日DDZ。查询间隔需 ≥3秒防频率限制。**
 
@@ -202,7 +233,7 @@ def get_ddx(name):
 3. **席位数据 `rawTable` 用数字 key**（'0','1','2'...）——不是字符串席位名，席位名在同级的 `nameMap` 中映射。
 4. **北交所股票代码**（920012等）——`mx_data.py` 查询时需用**完整名称**（如"创达新材"），不能用纯数字代码。
 5. **DDX数据缺失**——部分股票（如固德电材、族兴新材、步步高）在妙想库中无DDX数据，输出"无DDX数据"而非报错。
-6. **模拟账户下单** —— 用 `mx_data.py` 的 `MXData().query('模拟下单', code, volume)` 接口（见 mx-moni skill）。
+6. **龙虎榜数据方向判断**——**禁止用单行买入/卖出绝对值判断净买净卖**。同一只股票有多个席位时，必须先 `net_by_code[code]` 聚合所有席位的NET字段，再判断正负。**2026-06-01京能电力教训**：买2.52亿/卖2.30亿 → 合并NET=+0.22亿（不是-2.16亿）。
 
 ---
 
