@@ -209,12 +209,55 @@ for _, row in wb.iterrows():
         print(f"可关注: {row['名称']}({row['代码']}) {row['所属行业']}")
 ```
 
-### Step 5 — 连板股输出
+### Step 5 — 连板股输出（⚠️ 必须使用交叉验证后的连板数）
 ```python
 lb = df[df['连板数'] > 1].sort_values('连板数', ascending=False)
 for _, r in lb.iterrows():
     zb_flag = f"炸板{r['炸板次数']}次" if r['炸板次数'] > 0 else "封死"
-    print(f"{r['名称']}({r['代码']}) {r['连板数']}连板 {zb_flag}")
+    # ⚠️ 使用 verified_lb_map 中已验证的连板数，不直接用 r['连板数']
+    verified = verified_lb_map.get(r['代码'], r['连板数'])
+    print(f"{r['名称']}({r['代码']}) {verified}连板 {zb_flag}")
+```
+
+### Step 5b — 连板数交叉验证（强制步骤，⚠️ 必须先于此步骤再进行其他所有操作）
+
+> **2026-06-03 新增，2026-06-04 实战修正：此步骤是所有后续报告数据的基础。必须在输出任何连板相关信息（连板股表格/尾盘涨停分类/预期差逆势股等）之前完成。**
+
+**执行时机**：获取涨停池后，**第一步**就做交叉验证，用验证后的真实连板数替代akshare原始字段，再进行后续所有分析。
+
+**交叉验证方法**：
+
+```python
+import akshare as ak
+yesterday = '20260602'  # 当前日期的上一交易日
+zt_y = ak.stock_zt_pool_em(date=yesterday)
+yesterday_zt_codes = set(zt_y['代码'].astype(str).tolist())
+
+# 对每只连板股验证昨日是否在涨停池中
+# 昨日涨停池无此股 → 当日是首板（连板数必须=1）
+# 昨日涨停池有且连板数=x → 今日连板数=x+1
+for _, r in lb.iterrows():
+    code = str(r['代码'])
+    if code in yesterday_zt_codes:
+        yz = zt_y[zt_y['代码'].astype(str) == code].iloc[0]
+        print(f"{r['名称']}: 昨日连板={yz['连板数']} → 今日应为{yz['连板数']+1}连板, 实际={r['连板数']}")
+    else:
+        print(f"{r['名称']}: 昨日未涨停, 当日应为首板, 实际={r['连板数']} ← 异常!")
+```
+
+**常见错误案例（2026-06-02教训）**：
+- 东杰智能被写成"2连板创业板"→ 核实：东杰智能06-01无涨停记录，06-02为首板炸48次，非连板
+- 郑州煤电被写成"一字板封死"→ 核实：首次封板09:31（非09:25~09:30竞价），炸板2次，实为首板非一字板
+
+**此步骤不能跳过**：akshare连板数字段来自当日行情系统，非历史推算，必须交叉验证才能排除异常值。
+
+### Step 6 — 炸板股TOP10
+```python
+zb = df[df['炸板次数'] > 0].sort_values('炸板次数', ascending=False)
+for _, r in zb.head(10).iterrows():
+    t_first = str(r['首次封板时间']).zfill(6)
+    t_last = str(r['最后封板时间']).zfill(6)
+    print(f"{r['名称']} 炸板{r['炸板次数']}次 首次:{t_first[:2]}:{t_first[2:4]} 最后封板:{t_last[:2]}:{t_last[2:4]}")
 ```
 
 ### Step 6 — 炸板股TOP10
@@ -234,31 +277,61 @@ for _, r in zb.head(10).iterrows():
 
 ```python
 import sys, time
-env_path = 'C:/Users/June/AppData/Local/hermes/.env'
-api_key = None
-with open(env_path) as f:
+sys.path.insert(0, 'C:/Users/June/AppData/Local/hermes/skills/dfcf/mx-data')
+import mx_data
+with open('C:/Users/June/AppData/Local/hermes/.env') as f:
     for line in f:
         if line.startswith('MX_APIKEY'):
             api_key = line.strip().split('=',1)[1].strip()
             break
-sys.path.insert(0, 'C:/Users/June/AppData/Local/hermes/skills/dfcf/mx-data')
-import mx_data
 client = mx_data.MXData(api_key=api_key)
 
-def get_ddx(name):
-    r = client.query(f'{name}DDX')
-    dt = r.get('data',{}).get('data',{}).get('searchDataResultDTO',{}).get('dataTableDTOList',[])
-    if not dt:
-        return {}
-    table = dt[0].get('table', {})
-    return {
-        'DDX': table.get('f88', ['-'])[0],
-        'DDY': table.get('f89', ['-'])[0],
-        'DDZ': table.get('f90', ['-'])[0]
-    }
+def get_ddx(code_or_name, periods=['DDX', '5日DDX', '10日DDX', 'DDY']):
+    """查询指定周期的DDX/DDY/DDZ数据。
+
+    MX返回格式：每个dataTableDTOList项的table是一个dict，
+    key是行索引字符串，value是对应行所有列值组成的列表。
+    headName是单元素数组如['2026-06-03 18:25']，不是标准列名。
+
+    返回格式：{period: value}，value为字符串如'-1.951'，'-'表示无数据
+    """
+    result = {}
+    for period in periods:
+        r = client.query(f'{code_or_name} {period}')
+        dt = r.get('data',{}).get('data',{}).get('searchDataResultDTO',{}).get('dataTableDTOList',[])
+        if not dt:
+            result[period] = '-'
+            continue
+        table = dt[0].get('table', {})
+        # 遍历table，取第一行数据（row[0]）
+        for idx, row in table.items():
+            if idx == 'headName' or not isinstance(row, list):
+                continue
+            result[period] = row[0] if row else '-'
+            break
+        else:
+            result[period] = '-'
+        time.sleep(3)
+    return result
+
+# 示例输出：
+# get_ddx('002491')
+# {'DDX': '-1.951', '5日DDX': '1.721', '10日DDX': '-1.303', 'DDY': '0.622'}
 ```
 
+**关键解析规则（已验证 2026-06-03）**：
+- MX DDX返回的table key是行号（如'0','1','2'），**不是**f88/f89/f90
+- `headName`是单元素数组如`['2026-06-03 18:25']`，不是标准列名
+- 每行数据直接用`row[0]`取值（第一个列值=DDX/DDY/DDZ的值）
+- 5日DDX/10日DDX/DDY需要单独查询，字段名格式：`'5日DDX'`, `'10日DDX'`, `'5日DDY'`, `'10日DDY'`
+
 **⚠️ 频率限制：每次查询间隔≥3秒，否则返回空数据。5日/10日DDX间隔也需≥3秒。**
+
+**⚠️ DDX值含义**：
+- DDX < 0：主力净流出
+- DDX > 0：主力净流入
+- DDZ < -20：特大单深度流出（高度警惕）
+- DDY > 0：散户短线活跃（可能是主力洗盘）
 
 ---
 
@@ -274,22 +347,23 @@ def get_ddx(name):
 ### 常见陷阱
 
 1. **日期格式错误** — `stock_zt_pool_em(date='2026-05-27')` 返回空，必须用`'20260527'`
-2. **⚠️ 混淆"某股在某天涨停"和"某天哪些股涨停" — 最常见 factual error**：
+2. **⚠️ 连板数字段系统性bug**：当股票昨日为首板但今日再次涨停时会错误显示为2连板。**必须用昨日涨停池交叉验证**：昨日不在涨停池→今日连板数=1（首板）。实测通鼎互联(002491)、双星新材(002585)均因此bug被错误标记。**此步骤是所有后续分析的第一步，必须先完成。**
+3. **首板完整列表**：用户明确要求列出全部70只首板股，格式为（股票/代码/行业/换手/炸板/封板时间/备注），不可省略
+4. **⚠️ 混淆"某股在某天涨停"和"某天哪些股涨停" — 最常见 factual error**：
    - `stock_zt_pool_em(date='20260529')` 的含义：**当天（5/29）有哪些股票涨停**，返回49只股票列表
    - **不要**把一只股票的涨停历史（如05-28涨停）错误安在另一日期（05-29）上
    - **正确流程**：先确认目标日期涨停池（`stock_zt_pool_em(date='YYYYMMDD')`），逐只检查持仓股是否在列
    - **如果持仓股不在当天涨停池**：它当天**没有涨停**，用MX接口日线数据（收盘价/涨跌幅）描述走势
-   - **实证教训**：002636在05-28涨停（+9.99%），在05-29涨停池中**不存在**，正确描述是"05-29高位平盘+0.02%"，而非"涨停炸板"
-3. **封板时间解析错误** — `92500`要zfill(6)补零后取前4位转整数再判断
-3. **错误使用搜索文章获取涨停** — JSONP搜索文章方式数据不准确（曾报61只正确47只）
-4. **push2.eastmoney.com被封** — akshare中依赖push2his的函数（如`stock_individual_fund_flow`）会失败，与涨停数据获取无关
-5. **DDX频率限制** — mx_data查询DDX间隔<3秒会返回空，需要耐心等待
-6. **一字板识别遗漏** — 要严格按09:25~09:30判断，不能跳过竞价阶段
-7. **一字板=封死是误解** — 一字板完全可能炸板（如中京电子炸4次），需同时看炸板次数和连板数
-8. **尾盘涨停判断错误** — 14:00后封板的标的需确认是否为修复封板（首次封板时间在早盘），修复封板按原封板时间分类
-9. **`stock_zt_pool_em`仅含涨停股** — 该函数只返回涨停股（涨幅10%/20%），不返回涨幅3%~9.9%的强势股，预期差逆势股需另辟蹊径
-10. **akshare涨停时间分布可能存在日期差异** — 2026-05-28数据显示：竞价一字板0只、5分钟快板0只、早盘板70只、午盘板0只、尾盘板32只，全天无09:25~09:30及09:31~09:35封板记录；如与涨停啦数据差异大，以涨停啦为准
-11. **腾讯行情qt.gtimg.cn涨跌幅字段对涨停股系统性失真** — 2026-05-28确认：全91只候选实际全部涨停+10%，但qt.gtimg.cn返回+0.23%~+8.17%等错误值；akshare的涨跌幅字段为真实值；判断股票是否涨停（涨幅是否为10%/20%）必须用akshare stock_zt_pool_em的涨跌幅字段，绝不能用qt.gtimg.cn的涨跌幅字段
+   - **实证教训（2026-06-02）**：华塑控股+4.67%和通鼎互联+8.15%被错误描述为"今日涨停"——两只均不在06-02涨停池67只中，实为非涨停跟风股
+3. **连板数判断必须交叉验证（2026-06-02新增）**：
+   - 判断"连板数"之前，必须先用`stock_zt_pool_em(date='yesterday')`确认昨日涨停池中有没有这只
+   - 昨日涨停池无记录 → 当日是首板（连板数=1），不可能是连板
+   - **实证**：东杰智能06-02涨停被写成"2连板创业板"——错误。核实：东杰智能06-01无涨停记录，06-02为首板炸48次，非连板
+   - **实证**：郑州煤电06-02被写成"一字板封死"——错误。核实：首次封板09:31（非09:25~09:30竞价），炸板2次，实为首板非一字板
+4. **一字板判断：首次封板时间必须在09:25~09:30**：
+   - 09:31封板 = 5分钟快板，不是竞价一字板
+   - 09:25~09:30 = 竞价封板（一字板），无论后续是否炸板
+5. **一字板=封死是误解** — 一字板完全可能炸板（如中京电子炸4次），需同时看炸板次数和连板数
 
 ### push2封禁时的实时行情查询
 
@@ -311,6 +385,14 @@ def get_ddx(name):
 #### 5分钟快板（09:31~09:35）N只
 #### 尾盘板（14:00之后）N只
 #### 连板股一览（N只）
+### 首板完整列表（70只）
+
+> ⚠️ 用户明确要求：首板股票需列出完整列表，格式与其他表格一致（股票/代码/行业/换手/炸板/封板时间/备注）
+
+| 股票 | 代码 | 行业 | 换手 | 炸板 | 封板时间 | 备注 |
+|------|------|------|------|------|---------|------|
+| （70条完整记录） | — | — | — | — | — | — |
+
 ### 预期差逆势股
 ### 炸板关注
 ### 创业板 + 北交所
@@ -320,22 +402,212 @@ def get_ddx(name):
 
 ### 涨停板结构表格格式规范
 
+**连板股表格列**：
+```
+| 股票 | 代码 | 连板 | 首次封板 | 炸板 | 行业 | 涨停原因 |
+```
+- 涨停原因：来自龙虎榜上榜原因（`stock_lhb_detail_em`）或强势股入选理由（`stock_zt_pool_strong_em`），见下方"涨停原因3-tier获取方法"
+
+**首板完整列表表格列**：
+```
+| 股票 | 代码 | 行业 | 换手 | 炸板 | 封板时间 | 涨停原因 |
+```
+- **必须包含涨停原因列**，不可省略
+- 按换手率降序排列
+- 涨停原因3-tier获取方法见下方专门章节
+
+**尾盘涨停表格列**：
+```
+| 股票 | 代码 | 行业 | 封板时间 | 涨停原因 |
+```
+
 **一字板 / 5分钟快板表格列**：
 ```
 | 股票 | 行业 | 封板状态 | 连板 |
 ```
 - 封板状态：`封死 ✅` 或 `炸N次 ⚠️`
 
-**尾盘板表格列**：
-```
-| 股票 | 行业 | 首次时间 | 封板状态 |
+---
+
+## 涨停原因3-tier获取方法（2026-06-04更新）
+
+> ⚠️ **必须执行此步骤**。涨停原因列不能留空，必须通过以下3层方法全部填充。
+
+### Tier流程
+
+```python
+import akshare as ak
+
+# ========== Tier 1: 获取基础数据 ==========
+zt = ak.stock_zt_pool_em(date='YYYYMMDD')
+zt['代码'] = zt['代码'].astype(str).str.zfill(6)
+
+lhb = ak.stock_lhb_detail_em(start_date='YYYYMMDD', end_date='YYYYMMDD')
+lhb['代码'] = lhb['代码'].astype(str).str.zfill(6)
+
+strong = ak.stock_zt_pool_strong_em(date='YYYYMMDD')
+strong['代码'] = strong['代码'].astype(str).str.zfill(6)
+
+# ========== Tier 2: 构建原因字典 ==========
+lhb_reason = dict(zip(lhb['代码'], lhb['上榜原因']))
+strong_reason = dict(zip(strong['代码'], strong['入选理由']))
+all_reasons = {**strong_reason, **lhb_reason}  # 合并，lhb优先
+
+# ========== Tier 3: 填充涨停原因 ==========
+def get_reason(code):
+    if code in all_reasons:
+        return all_reasons[code]
+    # 手动补充（板块/题材关键词）
+    manual = {
+        '603500': '超级电容概念',
+        '002213': '存储芯片概念',
+        '003043': '光刻机概念',
+        '000536': '股东持股司法处置',
+        '001376': '定增审核通过',
+        '600868': '电力板块首板',
+        '600828': '零售板块首板',
+        '002590': '汽车零部首板',
+        '000670': '其他电子首板',
+        '600703': '光学光电首板',
+        '000520': '航运港口首板',
+        '002931': '通用设备首板',
+        '002051': '专业工程首板',
+        '603090': '通用设备首板',
+        '002824': '工业金属首板',
+        '002520': '通用设备首板',
+        '002733': '军工电子首板',
+        '603950': '汽车零部首板',
+        '601666': '煤炭板块首板',
+        '603286': '汽车零部首板',
+        '002395': '塑料板块首板',
+        '603903': '环境治理首板',
+        '605060': '通用设备首板',
+        '603005': '半导体封测',
+        '603067': '化学原料首板',
+        '603989': '电子元件首板',
+        '603210': '汽车零部首板',
+        '002570': '饮料乳品首板',
+        '002981': '消费电子首板',
+    }
+    return manual.get(code, '首板')
+
+zt['涨停原因'] = zt['代码'].apply(get_reason)
 ```
 
-**连板股表格列**：
+### 各数据源覆盖能力
+
+| 数据源 | 覆盖涨停股 | 说明 |
+|--------|-----------|------|
+| `stock_lhb_detail_em` | ~47只 | 有上榜原因的标准文本 |
+| `stock_zt_pool_strong_em` | ~29只首板 | 入选理由=涨停原因 |
+| 手动补充 | ~33只 | 板块/题材关键词 |
+
+### 上榜原因关键词分类
+
+| 关键词 | 含义 |
+|--------|------|
+| 连续3日涨幅偏离20% | 主板连续3日异动 |
+| 日涨幅偏离值达到7% | 单日10cm涨幅异常 |
+| 日涨幅达到15% | 创业板涨停（20cm） |
+| 科创板涨幅达到15% | 科创板20cm涨停 |
+| 日换手率达到20% | 高换手率上榜 |
+| 日价格振幅达到15% | 日内振幅大 |
+| 连续3日涨幅偏离30% | 科创/创业连续3日涨30% |
+| 北交所3日涨跌幅累计达±40% | 北交所特规 |
+| 60日新高 | 强势股突破新高 |
+| 近期多次涨停 | 强势股反复涨停 |
+| 日收盘价涨幅偏离7% | 主板日涨幅偏离7% |
+
+---
+
+## Beta + 抗跌-修复分析（2026-06-04新增）
+
+> 通过对比近13个交易日个股与上证指数的Beta，识别"个股跑输大盘但3日内完全收复"的刻意压盘模式，筛选有主力控盘迹象的首板股。
+
+### 数据源
+- 腾讯K线 `web.ifzq.gtimg.cn`（前复权日K）
+- 上证指数K线同步获取
+
+### 筛选标准
+
 ```
-| 股票 | 连板数 | 板块 | 备注 |
+纳入条件：
+  Beta 0.5~2.5 + 抗跌-修复次数≥2（稳健型）
+  或 Beta>2.5 + 抗跌-修复次数≥2（高弹性激进型）
+
+排除条件：
+  RSI>85（超买区）
+  市值>70亿（盘子太大）
 ```
-- 备注列：注明量化席位、板块情绪等关键风险点
+
+### 抗跌-修复判断标准
+
+当日个股满足以下全部条件=1次"抗跌"：
+1. 上证指数当日涨幅 < -0.3%（大盘明显下跌）
+2. 个股跌幅 < 上证跌幅的50%（跑赢大盘）
+3. 随后3个交易日内，个股收复全部失地（回到压盘前价格）
+
+```python
+# 抗跌事件伪代码
+for i in range(len(klines)-3):
+    today = klines[i]
+    index_today = index_klines[i]
+    if index_today['change'] < -0.3:  # 大盘下跌
+        if today['change'] < index_today['change'] * 0.5:  # 个股跑赢
+            # 检查随后3日内是否收复
+            low_after = min(k['low'] for k in klines[i:i+3])
+            if low_after >= today['close']:  # 未跌破压盘价
+                anti_count += 1
+```
+
+### Beta计算方法
+
+```python
+# 20日窗口收益率回归
+import numpy as np
+
+def calc_beta(stock_klines, index_klines, window=20):
+    """计算相对上证指数的beta系数"""
+    stock_ret = []
+    index_ret = []
+    for i in range(1, min(window+1, len(stock_klines))):
+        s_close = float(stock_klines[-i][1])
+        s_prev = float(stock_klines[-i-1][1])
+        i_close = float(index_klines[-i][1])
+        i_prev = float(index_klines[-i-1][1])
+        stock_ret.append((s_close - s_prev) / s_prev)
+        index_ret.append((i_close - i_prev) / i_prev)
+    
+    if len(stock_ret) < 10:
+        return None
+    # 线性回归: stock_ret = alpha + beta * index_ret
+    beta = np.polyfit(index_ret, stock_ret, 1)[0]
+    return beta
+```
+
+### 分析脚本参考
+
+```bash
+# beta_analysis2.py — 多前缀K线抓取+beta/anti计算
+# 使用腾讯ifzq API，多前缀重试机制处理部分代码不稳定问题
+# 存储结果到 beta_anti.pkl
+```
+
+### 综合评级输出格式
+
+```
+| 股票 | 代码 | 板块 | Beta | 抗跌次数 | RSI | 今日封板 | 连板概率 | 综合评级 |
+|------|------|------|------|---------|-----|---------|---------|---------|
+```
+
+### 连板概率评级说明
+
+| 评级 | 含义 |
+|------|------|
+| ⭐⭐⭐ 强烈推荐 | Beta 0.5~2.0 + 抗跌≥2 + 封板质量好 + 板块高潮 |
+| ⭐⭐⭐ 推荐 | Beta 0.5~2.5 + 抗跌≥2 + 封板0炸板 |
+| ⭐⭐ 观察 | Beta>2.5 或 抗跌≥3，但换手偏高/市值偏大 |
+| ⭐ 谨慎 | 抗跌特征存在，但板块/封板质量一般 |
 
 ---
 
@@ -462,6 +734,8 @@ for _, r in lhb_zt.iterrows():
 ---
 
 - RSI计算参考：`references/rsi-tencent-kline.md`（腾讯K线RSI-6计算已验证模式，含JSON解析陷阱和创业板/科创板降级处理）
+- 腾讯K线volume字段解析：`references/tencent-kline-volume.md`（k[5]是浮点数字符串，非整数字符串）
+- MX Search类调用方式：`references/mx-search-usage.md`（import MXSearch类而非走CLI脚本）
 
 ## 成交额/换手率数据源
 
